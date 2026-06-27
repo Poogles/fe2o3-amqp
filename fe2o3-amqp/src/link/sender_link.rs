@@ -71,7 +71,7 @@ where
         &mut self,
         writer: &mpsc::Sender<LinkFrame>,
         detached: Fut,
-    ) -> Result<[u8; 4], LinkStateError>
+    ) -> Result<[u8; 16], LinkStateError>
     where
         Fut: Future<Output = Option<LinkFrame>> + Send,
     {

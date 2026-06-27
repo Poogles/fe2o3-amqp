@@ -27,7 +27,7 @@ default = [
     # "scram",
 ]
 
-transaction = ["fe2o3-amqp-types/transaction", "uuid"]
+transaction = ["fe2o3-amqp-types/transaction"]
 
 # TLS related features
 rustls = ["tokio-rustls", "librustls", "webpki-roots", "ring"]
@@ -73,7 +73,7 @@ tokio-rustls = { workspace = true, features = ["logging", "tls12"], optional = t
 librustls = { workspace = true, features = ["logging", "std", "tls12"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-uuid = { workspace = true, features = ["v4"], optional = true }
+uuid = { workspace = true, features = ["v4"] }
 tokio = { workspace = true, features = ["sync", "io-util", "net", "rt", "macros", "time"] }
 libnative-tls = { workspace = true, optional = true }
 tokio-native-tls = { workspace = true, optional = true }
@@ -83,7 +83,7 @@ librustls = { workspace = true, features = ["aws_lc_rs"], optional = true }
 tokio-stream = { workspace = true, features = ["time"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-uuid = { workspace = true, features = ["v4", "rng-getrandom"], optional = true }
+uuid = { workspace = true, features = ["v4", "rng-getrandom"] }
 tokio = { workspace = true, features = ["sync", "io-util", "rt", "macros"] } # "net" feature doesn't support wasm32
 # aws-lc-rs does not support wasm32, so rustls keeps the ring provider here. The
 # explicit ring dep applies ring's wasm getrandom backend to the copy rustls pulls in.

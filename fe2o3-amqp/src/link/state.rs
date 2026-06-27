@@ -1,9 +1,10 @@
 //! Link state and link flow state
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{cell::Cell, marker::PhantomData, sync::Arc};
 
 use fe2o3_amqp_types::definitions::{Fields, SequenceNo};
 use parking_lot::RwLock;
+use uuid::Uuid;
 
 use crate::{
     endpoint::{LinkFlow, OutputHandle},
@@ -11,6 +12,19 @@ use crate::{
 };
 
 use super::{role, ReceiverTransferError, SenderFlowState};
+
+thread_local! {
+    static CUSTOM_DELIVERY_TAG: Cell<Option<[u8; 16]>> = const { Cell::new(None) };
+}
+
+#[allow(dead_code)]
+pub fn set_custom_delivery_tag(tag: [u8; 16]) {
+    CUSTOM_DELIVERY_TAG.with(|t| t.set(Some(tag)));
+}
+
+pub fn clear_custom_delivery_tag() {
+    CUSTOM_DELIVERY_TAG.with(|t| t.set(None));
+}
 
 /// Link state.
 ///
@@ -298,11 +312,12 @@ impl ProducerState for Arc<LinkFlowState<role::SenderMarker>> {
     }
 }
 
+#[derive(Debug)]
 struct InsufficientCredit {}
 
 impl Consume for SenderFlowState {
     type Item = u32;
-    type Outcome = [u8; 4];
+    type Outcome = [u8; 16];
 
     /// Increment delivery count and decrement link_credit. Wait asynchronously
     /// if there is not enough credit
@@ -335,27 +350,55 @@ cfg_transaction! {
             if state.link_credit < item {
                 Err(Self::Error::InsufficientCredit)
             } else {
-                let tag = state.delivery_count.to_be_bytes();
-                state.delivery_count = state.delivery_count.wrapping_add(item);
-                state.link_credit = state.link_credit.saturating_sub(item);
+                let tag = generate_delivery_tag(&mut state);
                 Ok(tag)
             }
         }
     }
 }
 
+/// Generate a 16-byte UUID delivery tag for Azure SDK compatibility.
+/// The Azure Python SDK expects delivery tags to be 16-byte UUIDs, not
+/// 4-byte counters. This ensures the lock_token property works correctly.
+///
+/// The SDK interprets delivery tag bytes as little-endian UUID
+/// (`uuid.UUID(bytes_le=self._delivery_tag)`), so we store the UUID bytes
+/// in little-endian order so the SDK sees the same UUID we store as the
+/// lock token.
+///
+/// If a custom delivery tag has been set via `set_custom_delivery_tag`,
+/// that tag is used instead of generating a new UUID. This allows the
+/// caller to ensure the delivery tag matches a lock token stored in the
+/// queue, so the Azure SDK's renew-lock requests find the right message.
+fn generate_delivery_tag(state: &mut LinkFlowStateInner) -> [u8; 16] {
+    state.delivery_count = state.delivery_count.wrapping_add(1);
+    state.link_credit = state.link_credit.saturating_sub(1);
+
+    if let Some(tag) = CUSTOM_DELIVERY_TAG.with(|t| t.get()) {
+        clear_custom_delivery_tag();
+        return tag;
+    }
+
+    let uuid = Uuid::new_v4();
+    // Convert big-endian UUID bytes to little-endian format so the Azure SDK
+    // (which uses uuid.UUID(bytes_le=delivery_tag)) sees the same UUID.
+    let bytes = uuid.as_bytes();
+    [
+        bytes[3], bytes[2], bytes[1], bytes[0], bytes[5], bytes[4], bytes[7], bytes[6], bytes[8],
+        bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ]
+}
+
 fn consume_link_credit(
     lock: &RwLock<LinkFlowStateInner>,
     count: u32,
-) -> Result<[u8; 4], InsufficientCredit> {
+) -> Result<[u8; 16], InsufficientCredit> {
     let mut state = lock.write();
 
     if state.link_credit < count {
         Err(InsufficientCredit {})
     } else {
-        let tag = state.delivery_count.to_be_bytes();
-        state.delivery_count = state.delivery_count.wrapping_add(count);
-        state.link_credit = state.link_credit.saturating_sub(count);
+        let tag = generate_delivery_tag(&mut state);
         Ok(tag)
     }
 }
@@ -509,5 +552,233 @@ mod tests {
 
         // All credits have been consumed already
         assert_pending!(consumer.consume(1));
+    }
+
+    #[test]
+    fn test_generate_delivery_tag_returns_16_bytes() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 5,
+            link_credit: 10,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let tag = super::generate_delivery_tag(&mut state);
+        assert_eq!(tag.len(), 16);
+        // Should not be all zeros
+        assert_ne!(tag, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_generate_delivery_tag_is_unique() {
+        let mut state1 = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 100,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+        let mut state2 = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 50,
+            link_credit: 100,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let tag1 = super::generate_delivery_tag(&mut state1);
+        let tag2 = super::generate_delivery_tag(&mut state2);
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn test_generate_delivery_tag_increments_delivery_count() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 10,
+            link_credit: 5,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let _ = super::generate_delivery_tag(&mut state);
+        assert_eq!(state.delivery_count, 11);
+        assert_eq!(state.link_credit, 4);
+    }
+
+    #[test]
+    fn test_custom_delivery_tag_is_used() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 10,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let custom = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        super::set_custom_delivery_tag(custom);
+
+        let tag = super::generate_delivery_tag(&mut state);
+        assert_eq!(tag, custom);
+    }
+
+    #[test]
+    fn test_custom_delivery_tag_consumed_once() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 10,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let custom = [0xFF; 16];
+        super::set_custom_delivery_tag(custom);
+
+        // First call uses the custom tag
+        let tag1 = super::generate_delivery_tag(&mut state);
+        assert_eq!(tag1, custom);
+
+        // Second call generates a new random tag
+        let tag2 = super::generate_delivery_tag(&mut state);
+        assert_ne!(tag2, custom);
+    }
+
+    #[test]
+    fn test_clear_custom_delivery_tag() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 10,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let custom = [0xAB; 16];
+        super::set_custom_delivery_tag(custom);
+        super::clear_custom_delivery_tag();
+
+        // Should get a random tag, not the cleared custom one
+        let tag = super::generate_delivery_tag(&mut state);
+        assert_ne!(tag, custom);
+    }
+
+    #[test]
+    fn test_generate_delivery_tag_uuid_v4_format() {
+        let mut state = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 10,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+
+        let tag = super::generate_delivery_tag(&mut state);
+
+        // UUID version 4 has the version nibble set to 4 in byte[7] (after byte swap)
+        // In the little-endian output, the version nibble (bits 12-15 of the
+        // original UUID clock_seq_hi_and_reserved byte) ends up at tag[7] >> 4.
+        // Actually the original UUID is at bytes index 6 (clock_seq_hi_and_reserved).
+        // In the byte-swapped output (little-endian), tag[7] = bytes[7] which is
+        // clock_seq_hi_and_reserved unchanged, so tag[7] >> 4 should be 4.
+        assert_eq!(tag[7] >> 4, 0x4, "UUID version should be 4");
+
+        // The variant bits (top 2 bits of clock_seq_hi_and_reserved at tag[8]) should be 10xxxxxx
+        let variant = tag[8] >> 6;
+        assert!(
+            variant == 0x2,
+            "UUID variant should be RFC 4122 (0x2), got {variant}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_consume_async_returns_16_bytes() {
+        let (mut producer, mut consumer) = create_sender_flow_state_producer_and_consumer();
+
+        let link_flow = LinkFlow {
+            link_credit: Some(1),
+            ..Default::default()
+        };
+        producer.produce((link_flow, OutputHandle(0))).await;
+
+        let tag = consumer.consume(1).await;
+        assert_eq!(tag.len(), 16);
+        assert_ne!(tag, [0u8; 16]);
+
+        // Should be a valid UUID v4
+        assert_eq!(tag[7] >> 4, 0x4);
+    }
+
+    #[tokio::test]
+    async fn test_consume_async_uses_custom_delivery_tag() {
+        let (mut producer, mut consumer) = create_sender_flow_state_producer_and_consumer();
+
+        let custom = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
+        super::set_custom_delivery_tag(custom);
+
+        let link_flow = LinkFlow {
+            link_credit: Some(2),
+            ..Default::default()
+        };
+        producer.produce((link_flow, OutputHandle(0))).await;
+
+        let tag1 = consumer.consume(1).await;
+        assert_eq!(tag1, custom, "first consume should use custom tag");
+
+        let tag2 = consumer.consume(1).await;
+        assert_ne!(tag2, custom, "second consume should use random tag");
+        assert_eq!(tag2.len(), 16);
+    }
+
+    #[test]
+    fn test_consume_link_credit_returns_16_bytes() {
+        let inner = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 5,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+        let lock = Arc::new(parking_lot::RwLock::new(inner));
+
+        let result = super::consume_link_credit(&lock, 1);
+        assert!(result.is_ok());
+        let tag = result.unwrap();
+        assert_eq!(tag.len(), 16);
+        assert_ne!(tag, [0u8; 16]);
+        assert_eq!(tag[7] >> 4, 0x4);
+    }
+
+    #[test]
+    fn test_consume_link_credit_insufficient_credit() {
+        let inner = LinkFlowStateInner {
+            initial_delivery_count: 0,
+            delivery_count: 0,
+            link_credit: 0,
+            available: 0,
+            drain: false,
+            properties: None,
+        };
+        let lock = parking_lot::RwLock::new(inner);
+
+        let result = super::consume_link_credit(&lock, 1);
+        assert!(result.is_err());
     }
 }
