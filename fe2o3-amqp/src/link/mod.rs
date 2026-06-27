@@ -54,7 +54,7 @@ pub mod sender;
 mod sender_link;
 pub(crate) mod shared_inner;
 mod source;
-pub(crate) mod state;
+pub mod state;
 pub mod target_archetype;
 
 /// Default amount of link credit
