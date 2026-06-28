@@ -2,10 +2,14 @@
 
 use std::{
     marker::PhantomData,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{
+        atomic::AtomicU32,
+        Arc,
+    },
 };
 
 use fe2o3_amqp_types::{
+    definitions::Fields,
     messaging::{Target, TargetArchetype},
     performatives::Attach,
     primitives::Symbol,
@@ -33,9 +37,10 @@ use super::link::SharedLinkAcceptorFields;
 /// the sender is considered to hold the authoritative version of the
 /// source properties, the receiver is considered to hold the authoritative version of the target properties.
 #[derive(Debug, Clone)]
-pub(crate) struct LocalReceiverLinkAcceptor<C, T, F>
+pub(crate) struct LocalReceiverLinkAcceptor<C, T, F, P>
 where
     F: Fn(T) -> Option<T>,
+    P: Fn(&mut Option<Fields>) + Send + Sync,
 {
     /// Credit mode of the link. This has no effect on a sender
     pub credit_mode: CreditMode,
@@ -57,13 +62,20 @@ where
     pub verify_incoming_source: bool,
     /// Whether the local link will verify the incoming source/target
     pub verify_incoming_target: bool,
+
+    /// Callback invoked after the link is created but before the attach response
+    /// is sent. Allows customizing the attach frame properties (e.g. injecting
+    /// `com.microsoft:locked-until-utc` for session locks).
+    pub on_attach_properties: P,
 }
 
 fn reject_dynamic_target<T>(_: T) -> Option<T> {
     None
 }
 
-impl<C, T> Default for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>> {
+fn default_on_attach_properties(_: &mut Option<Fields>) {}
+
+impl<C, T> Default for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>, fn(&mut Option<Fields>)> {
     fn default() -> Self {
         Self {
             credit_mode: CreditMode::default(),
@@ -73,13 +85,15 @@ impl<C, T> Default for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>> {
             target_marker: PhantomData,
             verify_incoming_source: true,
             verify_incoming_target: true,
+            on_attach_properties: default_on_attach_properties,
         }
     }
 }
 
-impl<F> LocalReceiverLinkAcceptor<Symbol, Target, F>
+impl<F, P> LocalReceiverLinkAcceptor<Symbol, Target, F, P>
 where
     F: Fn(Target) -> Option<Target>,
+    P: Fn(&mut Option<Fields>) + Send + Sync,
 {
     pub async fn accept_incoming_attach<R>(
         &self,
@@ -98,10 +112,11 @@ where
     }
 }
 
-impl<C, T, F> LocalReceiverLinkAcceptor<C, T, F>
+impl<C, T, F, P> LocalReceiverLinkAcceptor<C, T, F, P>
 where
     C: Clone,
     F: Fn(T) -> Option<T>,
+    P: Fn(&mut Option<Fields>) + Send + Sync,
 {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn accept_incoming_attach_inner(
@@ -242,7 +257,13 @@ where
                     }
                 }
             }
-            _ => link.send_attach(&outgoing, &control, false).await?,
+            _ => {
+                // Invoke the attach properties callback before sending the attach response.
+                // This allows the emulator to inject custom properties (e.g. session lock expiry)
+                // into the attach frame that the Azure SDK reads in its on_attach callback.
+                (self.on_attach_properties)(&mut link.flow_state.lock.write().properties);
+                link.send_attach(&outgoing, &control, false).await?;
+            }
         }
 
         let mut inner = ReceiverInner {

@@ -543,10 +543,8 @@ where
         //
         // the receiver is considered to hold the authoritative version of the target properties
         match (&self.target, &target) {
-            (Some(local_target), Some(remote_target)) => {
-                if self.verify_incoming_target {
-                    local_target.verify_as_sender(remote_target)?
-                }
+            (Some(local_target), Some(remote_target)) if self.verify_incoming_target => {
+                local_target.verify_as_sender(remote_target)?
             }
             // Only need to check the target
             //

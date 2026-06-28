@@ -353,7 +353,7 @@ impl Builder<SessionAcceptor, Initialized> {
 
 impl Default
     for Builder<
-        LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>>,
+        LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>, fn(&mut Option<Fields>)>,
         Initialized,
     >
 {
@@ -363,7 +363,7 @@ impl Default
 }
 
 impl
-    Builder<LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>>, Initialized>
+    Builder<LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>, fn(&mut Option<Fields>)>, Initialized>
 {
     /// Creates a new builder for [`LinkAcceptor`]
     pub fn new() -> Self {
@@ -378,10 +378,11 @@ impl
     }
 }
 
-impl<FS, FT> Builder<LinkAcceptor<FS, FT>, Initialized>
+impl<FS, FT, FP> Builder<LinkAcceptor<FS, FT, FP>, Initialized>
 where
     FS: Fn(Source) -> Option<Source>,
     FT: Fn(Target) -> Option<Target>,
+    FP: Fn(&mut Option<Fields>) + Send + Sync,
 {
     /// Settlement policy for the sender
     pub fn supported_sender_settle_modes(mut self, modes: SupportedSenderSettleModes) -> Self {
@@ -497,7 +498,7 @@ where
     /// node creation is not supported, then a `None` should be returned.
     ///
     /// The default handler simply rejects the request by returning a `None`
-    pub fn on_dynamic_target<F>(self, op: F) -> Builder<LinkAcceptor<FS, F>, Initialized>
+    pub fn on_dynamic_target<F>(self, op: F) -> Builder<LinkAcceptor<FS, F, FP>, Initialized>
     where
         F: Fn(Target) -> Option<Target>,
     {
@@ -509,6 +510,7 @@ where
             target_marker: PhantomData,
             verify_incoming_source: self.inner.local_receiver_acceptor.verify_incoming_source,
             verify_incoming_target: self.inner.local_receiver_acceptor.verify_incoming_target,
+            on_attach_properties: self.inner.local_receiver_acceptor.on_attach_properties,
         };
         let inner = LinkAcceptor {
             shared: self.inner.shared,
@@ -528,7 +530,7 @@ where
     /// node creation is not supported, then a `None` should be returned.
     ///
     /// The default handler simply rejects the request by returning a `None`
-    pub fn on_dynamic_source<F>(self, op: F) -> Builder<LinkAcceptor<F, FT>, Initialized>
+    pub fn on_dynamic_source<F>(self, op: F) -> Builder<LinkAcceptor<F, FT, FP>, Initialized>
     where
         F: Fn(Source) -> Option<Source>,
     {
@@ -543,6 +545,56 @@ where
             shared: self.inner.shared,
             local_sender_acceptor,
             local_receiver_acceptor: self.inner.local_receiver_acceptor,
+        };
+
+        Builder {
+            inner,
+            marker: PhantomData,
+        }
+    }
+
+    /// Sets a callback to customize the attach frame properties before the attach
+    /// response is sent. This is invoked after the link is created but before the
+    /// attach performative is transmitted to the remote peer.
+    ///
+    /// The callback receives a mutable reference to the properties `Option<Fields>`,
+    /// allowing it to add, modify, or remove properties.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let link_acceptor = LinkAcceptor::builder()
+    ///     .on_attach_properties(|props| {
+    ///         if let Some(ref mut fields) = props {
+    ///             fields.insert(
+    ///                 Symbol::from("custom-property"),
+    ///                 Value::String("value".to_string()),
+    ///             );
+    ///         }
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn on_attach_properties<P>(
+        self,
+        op: P,
+    ) -> Builder<LinkAcceptor<FS, FT, P>, Initialized>
+    where
+        P: Fn(&mut Option<Fields>) + Send + Sync,
+    {
+        let local_receiver_acceptor = LocalReceiverLinkAcceptor {
+            credit_mode: self.inner.local_receiver_acceptor.credit_mode,
+            target_capabilities: self.inner.local_receiver_acceptor.target_capabilities,
+            auto_accept: self.inner.local_receiver_acceptor.auto_accept,
+            on_dynamic_target: self.inner.local_receiver_acceptor.on_dynamic_target,
+            target_marker: PhantomData,
+            verify_incoming_source: self.inner.local_receiver_acceptor.verify_incoming_source,
+            verify_incoming_target: self.inner.local_receiver_acceptor.verify_incoming_target,
+            on_attach_properties: op,
+        };
+        let inner = LinkAcceptor {
+            shared: self.inner.shared,
+            local_sender_acceptor: self.inner.local_sender_acceptor,
+            local_receiver_acceptor,
         };
 
         Builder {

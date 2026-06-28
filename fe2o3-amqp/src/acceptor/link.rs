@@ -127,14 +127,15 @@ impl Default for SharedLinkAcceptorFields {
 /// ```
 ///
 #[derive(Debug, Clone)]
-pub struct LinkAcceptor<FS, FT>
+pub struct LinkAcceptor<FS, FT, FP>
 where
     FS: Fn(Source) -> Option<Source>,
     FT: Fn(Target) -> Option<Target>,
+    FP: Fn(&mut Option<Fields>) + Send + Sync,
 {
     pub(crate) shared: SharedLinkAcceptorFields,
     pub(crate) local_sender_acceptor: LocalSenderLinkAcceptor<Symbol, FS>,
-    pub(crate) local_receiver_acceptor: LocalReceiverLinkAcceptor<Symbol, Target, FT>,
+    pub(crate) local_receiver_acceptor: LocalReceiverLinkAcceptor<Symbol, Target, FT, FP>,
 }
 
 impl<FS, FT> std::fmt::Display for LinkAcceptor<FS, FT>
@@ -147,7 +148,7 @@ where
     }
 }
 
-impl Default for LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>> {
+impl Default for LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>, fn(&mut Option<Fields>)> {
     fn default() -> Self {
         Self {
             shared: Default::default(),
@@ -169,10 +170,11 @@ impl LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>> {
     }
 }
 
-impl<FS, FT> LinkAcceptor<FS, FT>
+impl<FS, FT, FP> LinkAcceptor<FS, FT, FP>
 where
     FS: Fn(Source) -> Option<Source>,
     FT: Fn(Target) -> Option<Target>,
+    FP: Fn(&mut Option<Fields>) + Send + Sync,
 {
     /// Convert the acceptor into a link acceptor builder. This allows users to configure
     /// particular field using the builder pattern

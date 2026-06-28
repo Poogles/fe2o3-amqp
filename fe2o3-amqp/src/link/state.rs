@@ -17,11 +17,23 @@ thread_local! {
     static CUSTOM_DELIVERY_TAG: Cell<Option<[u8; 16]>> = const { Cell::new(None) };
 }
 
+/// Sets a custom 16-byte delivery tag to be used for the next message transfer.
+///
+/// When set, the next call to `generate_delivery_tag` will return this custom tag
+/// instead of generating a new UUID. This is used by the emulator to ensure the
+/// delivery tag matches a lock token stored in the queue, so the Azure SDK's
+/// renew-lock requests find the right message.
+///
+/// The custom tag is consumed (cleared) after being used once.
 #[allow(dead_code)]
 pub fn set_custom_delivery_tag(tag: [u8; 16]) {
     CUSTOM_DELIVERY_TAG.with(|t| t.set(Some(tag)));
 }
 
+/// Clears any custom delivery tag that was set via `set_custom_delivery_tag`.
+///
+/// After clearing, the next call to `generate_delivery_tag` will generate a new
+/// random UUID instead of using the custom tag.
 pub fn clear_custom_delivery_tag() {
     CUSTOM_DELIVERY_TAG.with(|t| t.set(None));
 }
