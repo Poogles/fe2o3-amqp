@@ -40,7 +40,7 @@ use super::link::SharedLinkAcceptorFields;
 pub(crate) struct LocalReceiverLinkAcceptor<C, T, F, P>
 where
     F: Fn(T) -> Option<T>,
-    P: Fn(&mut Option<Fields>) + Send + Sync,
+    P: Fn(Option<&str>, &mut Option<Fields>) + Send + Sync,
 {
     /// Credit mode of the link. This has no effect on a sender
     pub credit_mode: CreditMode,
@@ -73,9 +73,11 @@ fn reject_dynamic_target<T>(_: T) -> Option<T> {
     None
 }
 
-fn default_on_attach_properties(_: &mut Option<Fields>) {}
+fn default_on_attach_properties(_: Option<&str>, _: &mut Option<Fields>) {}
 
-impl<C, T> Default for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>, fn(&mut Option<Fields>)> {
+impl<C, T> Default
+    for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>, fn(Option<&str>, &mut Option<Fields>)>
+{
     fn default() -> Self {
         Self {
             credit_mode: CreditMode::default(),
@@ -93,7 +95,7 @@ impl<C, T> Default for LocalReceiverLinkAcceptor<C, T, fn(T) -> Option<T>, fn(&m
 impl<F, P> LocalReceiverLinkAcceptor<Symbol, Target, F, P>
 where
     F: Fn(Target) -> Option<Target>,
-    P: Fn(&mut Option<Fields>) + Send + Sync,
+    P: Fn(Option<&str>, &mut Option<Fields>) + Send + Sync,
 {
     pub async fn accept_incoming_attach<R>(
         &self,
@@ -116,7 +118,7 @@ impl<C, T, F, P> LocalReceiverLinkAcceptor<C, T, F, P>
 where
     C: Clone,
     F: Fn(T) -> Option<T>,
-    P: Fn(&mut Option<Fields>) + Send + Sync,
+    P: Fn(Option<&str>, &mut Option<Fields>) + Send + Sync,
 {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn accept_incoming_attach_inner(
@@ -235,6 +237,17 @@ where
             verify_incoming_target: self.verify_incoming_target,
         };
 
+        // Extract target address before consuming remote_attach
+        let target_addr = remote_attach
+            .target
+            .as_ref()
+            .and_then(|t| match t.as_ref() {
+                TargetArchetype::Target(target) => {
+                    target.address.as_ref().map(|a| a.to_string())
+                }
+                _ => None,
+            });
+
         // `on_incoming_attach` should always be evaluated
         match (err, link.on_incoming_attach(remote_attach)) {
             (Some(attach_error), _) | (_, Err(attach_error)) => {
@@ -261,7 +274,9 @@ where
                 // Invoke the attach properties callback before sending the attach response.
                 // This allows the emulator to inject custom properties (e.g. session lock expiry)
                 // into the attach frame that the Azure SDK reads in its on_attach callback.
-                (self.on_attach_properties)(&mut link.flow_state.lock.write().properties);
+                // The callback receives the target address extracted from the incoming attach
+                // and mutable access to the response properties.
+                (self.on_attach_properties)(target_addr.as_deref(), &mut link.flow_state.lock.write().properties);
                 link.send_attach(&outgoing, &control, false).await?;
             }
         }

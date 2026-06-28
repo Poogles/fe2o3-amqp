@@ -353,7 +353,11 @@ impl Builder<SessionAcceptor, Initialized> {
 
 impl Default
     for Builder<
-        LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>, fn(&mut Option<Fields>)>,
+        LinkAcceptor<
+            fn(Source) -> Option<Source>,
+            fn(Target) -> Option<Target>,
+            fn(Option<&str>, &mut Option<Fields>),
+        >,
         Initialized,
     >
 {
@@ -363,7 +367,14 @@ impl Default
 }
 
 impl
-    Builder<LinkAcceptor<fn(Source) -> Option<Source>, fn(Target) -> Option<Target>, fn(&mut Option<Fields>)>, Initialized>
+    Builder<
+        LinkAcceptor<
+            fn(Source) -> Option<Source>,
+            fn(Target) -> Option<Target>,
+            fn(Option<&str>, &mut Option<Fields>),
+        >,
+        Initialized,
+    >
 {
     /// Creates a new builder for [`LinkAcceptor`]
     pub fn new() -> Self {
@@ -382,7 +393,7 @@ impl<FS, FT, FP> Builder<LinkAcceptor<FS, FT, FP>, Initialized>
 where
     FS: Fn(Source) -> Option<Source>,
     FT: Fn(Target) -> Option<Target>,
-    FP: Fn(&mut Option<Fields>) + Send + Sync,
+    FP: Fn(Option<&str>, &mut Option<Fields>) + Send + Sync,
 {
     /// Settlement policy for the sender
     pub fn supported_sender_settle_modes(mut self, modes: SupportedSenderSettleModes) -> Self {
@@ -557,14 +568,17 @@ where
     /// response is sent. This is invoked after the link is created but before the
     /// attach performative is transmitted to the remote peer.
     ///
-    /// The callback receives a mutable reference to the properties `Option<Fields>`,
-    /// allowing it to add, modify, or remove properties.
+    /// The callback receives:
+    /// - An optional target address string extracted from the incoming attach's
+    ///   `TargetArchetype::Target`.
+    /// - A mutable reference to the properties `Option<Fields>`,
+    ///   allowing it to add, modify, or remove properties.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let link_acceptor = LinkAcceptor::builder()
-    ///     .on_attach_properties(|props| {
+    ///     .on_attach_properties(|target_addr, props| {
     ///         if let Some(ref mut fields) = props {
     ///             fields.insert(
     ///                 Symbol::from("custom-property"),
@@ -579,7 +593,7 @@ where
         op: P,
     ) -> Builder<LinkAcceptor<FS, FT, P>, Initialized>
     where
-        P: Fn(&mut Option<Fields>) + Send + Sync,
+        P: Fn(Option<&str>, &mut Option<Fields>) + Send + Sync,
     {
         let local_receiver_acceptor = LocalReceiverLinkAcceptor {
             credit_mode: self.inner.local_receiver_acceptor.credit_mode,
